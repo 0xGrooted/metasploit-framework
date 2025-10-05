@@ -584,22 +584,45 @@ def cmd_edit(*args)
     client_path = args[0]
     client_path = client.fs.file.expand_path(client_path) if client_path =~ path_expand_regex
 
-    # Use the built-in download_file method instead of manual read
-    print_status("Downloading #{client_path} for editing...")
+    # Verify the file exists and is not a directory
+    begin
+      stat = client.fs.file.stat(client_path)
+    rescue ::Rex::Post::Meterpreter::RequestError => e
+      print_error("Cannot access #{client_path}: #{e.message}")
+      return false
+    end
+
+    if stat.directory?
+      print_error("#{client_path} is a directory, not a file")
+      return false
+    end
+
+    # Download using the same approach as cmd_cat
+    print_status("Downloading #{client_path}...")
     
     begin
-      client.fs.file.download_file(temp_path, client_path)
+      fd = client.fs.file.new(client_path, "rb")
+      begin
+        until fd.eof?
+          data = fd.read
+          meterp_temp.write(data) if data
+        end
+      rescue EOFError
+        # EOFError is raised if file is empty or EOF reached, which is normal
+      end
+      fd.close
       
-      # Verify the download
-      remote_stat = client.fs.file.stat(client_path)
+      meterp_temp.flush
+      
+      # Verify something was downloaded for non-empty files
       local_size = ::File.size?(temp_path) || 0
       
-      if local_size != remote_stat.size
-        print_error("Download verification failed: expected #{remote_stat.size} bytes, got #{local_size} bytes")
+      if local_size == 0 && stat.size > 0
+        print_error("Download failed: expected #{stat.size} bytes but got 0")
         return false
       end
       
-      print_status("Download complete (#{local_size} bytes)")
+      print_status("Downloaded #{local_size} bytes")
       
     rescue ::Rex::Post::Meterpreter::RequestError => e
       print_error("Failed to download #{client_path}: #{e.message}")
@@ -608,6 +631,9 @@ def cmd_edit(*args)
       print_error("Failed to download #{client_path}: #{e.class} - #{e.message}")
       return false
     end
+
+    # Close the temp file so the editor can open it
+    meterp_temp.close
 
     # Open the file in the user's editor
     editor = Rex::Compat.getenv('EDITOR') || 'vi'
@@ -625,7 +651,7 @@ def cmd_edit(*args)
     end
     
   ensure
-    meterp_temp.close!
+    meterp_temp.close! if meterp_temp && !meterp_temp.closed?
   end
 
   true
