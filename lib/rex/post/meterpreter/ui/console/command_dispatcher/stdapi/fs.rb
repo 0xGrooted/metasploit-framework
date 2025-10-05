@@ -575,32 +575,50 @@ class Console::CommandDispatcher::Stdapi::Fs
   # the contents to the remote machine after completion.
   #
   def cmd_edit(*args)
-    if args.empty? || args.include?('-h')
+    if args.include?('-h') || args.include?('-?')
       cmd_edit_help
       return true
     end
-
+  
+    if args.empty? || args.length > 1
+      cmd_edit_help
+      return false
+    end
+  
     # Get a temporary file path
     meterp_temp = Tempfile.new('meterp')
     meterp_temp.binmode
     temp_path = meterp_temp.path
-
+  
+    # Path expansion
     client_path = args[0]
     client_path = client.fs.file.expand_path(client_path) if client_path =~ path_expand_regex
-
+  
     # Try to download the file, but don't worry if it doesn't exist
-    client.fs.file.download_file(temp_path, client_path) rescue nil
-
+    begin
+      client.fs.file.download_file(temp_path, client_path)
+    rescue ::Rex::Post::Meterpreter::RequestError
+      # If file doesn't exist, allow editing a new file
+    end
+  
     # Spawn the editor (default to vi)
     editor = Rex::Compat.getenv('EDITOR') || 'vi'
-
-    # If it succeeds, upload it to the remote side.
-    if (system("#{editor} #{temp_path}") == true)
-      client.fs.file.upload_file(client_path, temp_path)
+    if system("#{editor} #{temp_path}") == true
+      begin
+        client.fs.file.upload_file(client_path, temp_path)
+        print_status("Edited #{client_path}")
+        return true
+      rescue ::Rex::Post::Meterpreter::RequestError => e
+        print_error("Failed to upload #{client_path}: #{e.message}")
+        return false
+      end
+    else
+      print_error("Editor exited with error or was not found")
+      return false
     end
-
-    # Get rid of that pesky temporary file
-    ::File.delete(temp_path) rescue nil
+  ensure
+    # Clean up the temporary file
+    meterp_temp.close! if meterp_temp
   end
 
   alias :cmd_edit_tabs :cmd_cat_tabs
