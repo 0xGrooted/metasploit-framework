@@ -570,57 +570,67 @@ class Console::CommandDispatcher::Stdapi::Fs
     print_line
   end
 
-  #
-  # Downloads a file to a temporary file, spawns and editor, and then uploads
-  # the contents to the remote machine after completion.
-  #
-  def cmd_edit(*args)
-    if args.include?('-h') || args.include?('-?')
-      cmd_edit_help
-      return true
-    end
-  
-    if args.empty? || args.length > 1
-      cmd_edit_help
-      return false
-    end
-  
-    # Get a temporary file path
-    meterp_temp = Tempfile.new('meterp')
-    meterp_temp.binmode
-    temp_path = meterp_temp.path
-  
-    # Path expansion
-    client_path = args[0]
-    client_path = client.fs.file.expand_path(client_path) if client_path =~ path_expand_regex
-  
-    # Try to download the file, but don't worry if it doesn't exist
-    begin
-      client.fs.file.download_file(temp_path, client_path)
-    rescue ::Rex::Post::Meterpreter::RequestError
-      # If file doesn't exist, allow editing a new file
-    end
-  
-    # Spawn the editor (default to vi)
-    editor = Rex::Compat.getenv('EDITOR') || 'vi'
-    if system("#{editor} #{temp_path}") == true
-      begin
-        client.fs.file.upload_file(client_path, temp_path)
-        print_status("Edited #{client_path}")
-        return true
-      rescue ::Rex::Post::Meterpreter::RequestError => e
-        print_error("Failed to upload #{client_path}: #{e.message}")
-        return false
-      end
-    else
-      print_error("Editor exited with error or was not found")
-      return false
-    end
-  ensure
-    # Clean up the temporary file
-    meterp_temp.close! if meterp_temp
+def cmd_edit(*args)
+  if args.empty? || args.length > 1 || args.include?('-h')
+    cmd_edit_help
+    return true
   end
 
+  meterp_temp = Tempfile.new('meterp')
+  meterp_temp.binmode
+  temp_path = meterp_temp.path
+
+  begin
+    client_path = args[0]
+    client_path = client.fs.file.expand_path(client_path) if client_path =~ path_expand_regex
+
+    # Use the built-in download_file method instead of manual read
+    print_status("Downloading #{client_path} for editing...")
+    
+    begin
+      client.fs.file.download_file(temp_path, client_path)
+      
+      # Verify the download
+      remote_stat = client.fs.file.stat(client_path)
+      local_size = ::File.size?(temp_path) || 0
+      
+      if local_size != remote_stat.size
+        print_error("Download verification failed: expected #{remote_stat.size} bytes, got #{local_size} bytes")
+        return false
+      end
+      
+      print_status("Download complete (#{local_size} bytes)")
+      
+    rescue ::Rex::Post::Meterpreter::RequestError => e
+      print_error("Failed to download #{client_path}: #{e.message}")
+      return false
+    rescue => e
+      print_error("Failed to download #{client_path}: #{e.class} - #{e.message}")
+      return false
+    end
+
+    # Open the file in the user's editor
+    editor = Rex::Compat.getenv('EDITOR') || 'vi'
+
+    if system("#{editor} #{temp_path}")
+      begin
+        print_status("Uploading changes to #{client_path}...")
+        client.fs.file.upload_file(client_path, temp_path)
+        print_status("Upload complete")
+      rescue ::Rex::Post::Meterpreter::RequestError => e
+        print_error("Failed to upload edited file to #{client_path}: #{e.message}")
+      end
+    else
+      print_error("Editor exited with an error. Upload cancelled.")
+    end
+    
+  ensure
+    meterp_temp.close!
+  end
+
+  true
+end
+  
   alias :cmd_edit_tabs :cmd_cat_tabs
 
   def cmd_ls_help
